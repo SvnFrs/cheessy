@@ -1,0 +1,34 @@
+{
+  "manifest_version": 3,
+  "name": "Cheessy Pro - Advanced Chess Analysis",
+  "version": "3.0.0",
+  "icons": {
+    "16": "assets/icon.png",
+    "48": "assets/icon.png",
+    "128": "assets/icon.png"
+  },
+  "description": "Advanced chess analysis tool with optimized performance and smart move tracking",
+  "permissions": [
+    "storage",
+    "activeTab"
+  ],
+  "content_scripts": [
+    {
+      "js": [
+        "src/content/main.js"
+      ],
+      "matches": [
+        "https://www.chess.com/*",
+        "https://chess.com/*"
+      ],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["assets/*"],
+      "matches": ["https://www.chess.com/*", "https://chess.com/*"]
+    }
+  ]
+}

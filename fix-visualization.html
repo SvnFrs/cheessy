@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chess Extension Fix Visualization</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        h1 {
+            color: #333;
+            border-bottom: 3px solid #4CAF50;
+            padding-bottom: 10px;
+        }
+        h2 {
+            color: #555;
+            margin-top: 30px;
+        }
+        .comparison {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin: 20px 0;
+        }
+        .before, .after {
+            padding: 20px;
+            border-radius: 8px;
+        }
+        .before {
+            background: #ffebee;
+            border: 2px solid #f44336;
+        }
+        .after {
+            background: #e8f5e9;
+            border: 2px solid #4CAF50;
+        }
+        .before h3 {
+            color: #d32f2f;
+            margin-top: 0;
+        }
+        .after h3 {
+            color: #2e7d32;
+            margin-top: 0;
+        }
+        code {
+            background: #f5f5f5;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: 'Courier New', monospace;
+        }
+        pre {
+            background: #2d2d2d;
+            color: #f8f8f2;
+            padding: 15px;
+            border-radius: 5px;
+            overflow-x: auto;
+        }
+        .flow {
+            background: #f0f4ff;
+            padding: 20px;
+            border-radius: 8px;
+            margin: 20px 0;
+        }
+        .step {
+            display: flex;
+            align-items: center;
+            margin: 15px 0;
+            padding: 15px;
+            background: white;
+            border-radius: 5px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        .step-number {
+            background: #4CAF50;
+            color: white;
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            margin-right: 15px;
+            flex-shrink: 0;
+        }
+        .arrow {
+            text-align: center;
+            font-size: 24px;
+            color: #4CAF50;
+            margin: 10px 0;
+        }
+        .highlight {
+            background: #fff3cd;
+            padding: 10px;
+            border-left: 4px solid #ffc107;
+            margin: 15px 0;
+        }
+        .success {
+            background: #d4edda;
+            border-left: 4px solid #28a745;
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 5px;
+        }
+        .chess-board {
+            display: inline-block;
+            margin: 10px;
+        }
+        .board-label {
+            text-align: center;
+            font-weight: bold;
+            margin-bottom: 10px;
+        }
+        .board-grid {
+            display: grid;
+            grid-template-columns: repeat(8, 40px);
+            gap: 0;
+            border: 2px solid #333;
+        }
+        .square {
+            width: 40px;
+            height: 40px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 24px;
+        }
+        .light {
+            background: #f0d9b5;
+        }
+        .dark {
+            background: #b58863;
+        }
+        .turn-indicator {
+            background: #4CAF50;
+            color: white;
+            padding: 5px 10px;
+            border-radius: 5px;
+            font-weight: bold;
+            display: inline-block;
+            margin: 5px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎯 Chess Extension Fix - Turn Handling</h1>
+        
+        <div class="highlight">
+            <strong>🐛 The Bug:</strong> The extension only suggested moves for White because it confused 
+            <strong>player color</strong> (which side you play) with 
+            <strong>active color</strong> (whose turn it is to move).
+        </div>
+
+        <h2>📊 Before vs After</h2>
+        <div class="comparison">
+            <div class="before">
+                <h3>❌ BEFORE (Broken)</h3>
+                <pre><code>// Always used player color
+var player_colour = "w";
+fen_string += ` ${player_colour}`;
+
+// Result:
+// fen_string = "position... w"
+// fen_string = "position... w" (WRONG!)
+// Always suggests for White only!</code></pre>
+            </div>
+            <div class="after">
+                <h3>✅ AFTER (Fixed)</h3>
+                <pre><code>// Now detects active turn
+var active_color = determineActiveColor();
+fen_string += ` ${active_color}`;
+
+// Result:
+// fen_string = "position... w"
+// fen_string = "position... b" (CORRECT!)
+// Alternates between both sides!</code></pre>
+            </div>
+        </div>
+
+        <h2>🔄 How It Works Now</h2>
+        <div class="flow">
+            <div class="step">
+                <div class="step-number">1</div>
+                <div>
+                    <strong>White's Turn</strong>
+                    <div class="turn-indicator">Active: White</div>
+                    <div>Engine suggests best move for White</div>
+                </div>
+            </div>
+            <div class="arrow">↓</div>
+            <div class="step">
+                <div class="step-number">2</div>
+                <div>
+                    <strong>White Makes Move</strong>
+                    <div>Board changes → Extension detects change</div>
+                </div>
+            </div>
+            <div class="arrow">↓</div>
+            <div class="step">
+                <div class="step-number">3</div>
+                <div>
+                    <strong>Black's Turn</strong>
+                    <div class="turn-indicator" style="background: #333;">Active: Black</div>
+                    <div>Engine suggests best move for Black</div>
+                </div>
+            </div>
+            <div class="arrow">↓</div>
+            <div class="step">
+                <div class="step-number">4</div>
+                <div>
+                    <strong>Black Makes Move</strong>
+                    <div>Board changes → Extension detects change</div>
+                </div>
+            </div>
+            <div class="arrow">↓</div>
+            <div class="step">
+                <div class="step-number">5</div>
+                <div>
+                    <strong>Back to White's Turn</strong>
+                    <div class="turn-indicator">Active: White</div>
+                    <div>Cycle continues...</div>
+                </div>
+            </div>
+        </div>
+
+        <h2>🎮 Board Orientation Handling</h2>
+        <div style="display: flex; justify-content: space-around; flex-wrap: wrap;">
+            <div class="chess-board">
+                <div class="board-label">Normal Board (White Bottom)</div>
+                <div style="text-align: center; margin: 10px 0;">
+                    <div>⚫ Black - Top</div>
+                    <div style="height: 20px;"></div>
+                    <div>⚪ White - Bottom</div>
+                </div>
+                <code style="display: block; text-align: center; margin-top: 10px;">
+                    bottomTurn → White<br>
+                    topTurn → Black
+                </code>
+            </div>
+            <div class="chess-board">
+                <div class="board-label">Flipped Board (Black Bottom)</div>
+                <div style="text-align: center; margin: 10px 0;">
+                    <div>⚪ White - Top</div>
+                    <div style="height: 20px;"></div>
+                    <div>⚫ Black - Bottom</div>
+                </div>
+                <code style="display: block; text-align: center; margin-top: 10px;">
+                    bottomTurn → Black<br>
+                    topTurn → White
+                </code>
+            </div>
+        </div>
+
+        <h2>🔍 Detection Method</h2>
+        <div class="highlight">
+            <strong>Primary Method:</strong> Check Chess.com clock indicators
+            <pre><code>// Look for active player's clock
+const bottomClock = document.querySelector('.clock-component.clock-bottom');
+const topClock = document.querySelector('.clock-component.clock-top');
+
+if (bottomClock.classList.contains('clock-player-turn')) {
+    // Bottom player's turn
+    return isFlipped ? 'b' : 'w';
+}
+else if (topClock.classList.contains('clock-player-turn')) {
+    // Top player's turn
+    return isFlipped ? 'w' : 'b';
+}</code></pre>
+        </div>
+
+        <div class="highlight" style="border-left-color: #17a2b8; background: #d1ecf1;">
+            <strong>Fallback Method:</strong> Alternate colors if detection fails
+            <pre><code>// If can't detect, alternate from last known state
+lastActiveColor = (lastActiveColor === 'w') ? 'b' : 'w';
+return lastActiveColor;</code></pre>
+        </div>
+
+        <h2>✨ Files Fixed</h2>
+        <ul>
+            <li>✅ <code>src/content/simple-main.js</code> - Enhanced turn detection</li>
+            <li>✅ <code>scripts-legacy/main.js</code> - Added active color function</li>
+            <li>✅ <code>src/content/main.js</code> - Updated adapter and FEN generator</li>
+        </ul>
+
+        <div class="success">
+            <h3>🎉 Result</h3>
+            <p><strong>The extension now works for both Black and White!</strong></p>
+            <ul>
+                <li>✅ Detects whose turn it is correctly</li>
+                <li>✅ Suggests moves for both sides</li>
+                <li>✅ Updates after every move automatically</li>
+                <li>✅ Handles board flipping (playing as Black)</li>
+                <li>✅ Continuous analysis throughout the game</li>
+            </ul>
+        </div>
+
+        <h2>🚀 How to Test</h2>
+        <div class="step" style="display: block;">
+            <strong>Test as White:</strong>
+            <ol>
+                <li>Start a game as White on Chess.com</li>
+                <li>Enable the Chessy extension</li>
+                <li>Make your move → Extension suggests for Black</li>
+                <li>After opponent moves → Extension suggests for White</li>
+            </ol>
+        </div>
+        <div class="step" style="display: block;">
+            <strong>Test as Black:</strong>
+            <ol>
+                <li>Start a game as Black on Chess.com</li>
+                <li>Enable the Chessy extension</li>
+                <li>Wait for opponent to move → Extension suggests for Black (you)</li>
+                <li>After your move → Extension suggests for White (opponent)</li>
+            </ol>
+        </div>
+
+        <h2>📝 Console Output Example</h2>
+        <pre><code style="color: #28a745;">✅ Simple Chess Extension loaded
+🚀 Starting Simple Chess Extension...
+✅ Board found
+🚀 Simple engine initialized
+UI created
+✅ Extension initialized successfully
+▶️ Starting analysis...
+Player color: White
+🔍 Analyzing position: rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w (active: White)
+Best move: e2e4
+🎯 Best move: e2e4
+
+<span style="color: #ffc107;">// After White moves e2e4...</span>
+Board changed!
+  Previous: rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w
+  Current:  rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b
+🔍 Analyzing position: rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b (active: Black)
+Best move: e7e5
+🎯 Best move: e7e5</code></pre>
+    </div>
+
+    <div class="container" style="text-align: center; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white;">
+        <h2 style="color: white; border-bottom-color: white;">🎯 Problem Solved!</h2>
+        <p style="font-size: 18px;">
+            The extension now properly handles both Black and White turns,<br>
+            suggesting the best move for whichever side needs to play next.
+        </p>
+    </div>
+</body>
+</html>
