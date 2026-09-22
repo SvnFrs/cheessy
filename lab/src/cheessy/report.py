@@ -167,3 +167,45 @@ def print_match_summary(reports: list[GameReport], console: Console) -> None:
             f"{round(sum(cpls) / len(cpls))} cp",
         )
     console.print(table)
+
+
+def report_to_dict(game: chess.pgn.Game, report: GameReport) -> dict:
+    """Serialise a reviewed game for the browser viewer.
+
+    Evaluations are carried twice on purpose: `cp` from the mover's point of
+    view (what "this move lost 40cp" means) and `cp_white` from White's, which
+    is the only frame an evaluation graph can be drawn in without the line
+    flipping sign every ply.
+    """
+    moves = []
+    for ann in report.annotations:
+        moves.append({
+            "ply": ann.ply,
+            "n": ann.move_number,
+            "color": "w" if ann.color == chess.WHITE else "b",
+            "san": ann.san,
+            "uci": ann.uci,
+            "cp": ann.cp_after,
+            "cp_white": ann.cp_after if ann.color == chess.WHITE else -ann.cp_after,
+            "label": ann.label,
+            "best": ann.best_san,
+            "is_best": ann.is_best,
+            "drop": round(ann.win_drop, 1),
+            "acc": round(ann.accuracy, 1),
+        })
+
+    def side(color: chess.Color) -> dict:
+        s = report.summaries[color]
+        return {"accuracy": round(s.accuracy, 1), "acpl": s.acpl, "counts": s.counts}
+
+    h = report.headers
+    return {
+        "white": h.get("White", "?"),
+        "black": h.get("Black", "?"),
+        "result": h.get("Result", "*"),
+        "opening": h.get("Opening", ""),
+        "termination": h.get("Termination", ""),
+        "book_plies": int(h.get("BookPlies", 0) or 0),
+        "summary": {"white": side(chess.WHITE), "black": side(chess.BLACK)},
+        "moves": moves,
+    }

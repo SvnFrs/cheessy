@@ -22,6 +22,7 @@ cd lab && uv venv && uv pip install -e .
 .venv/bin/python -m pytest tests/ -q          # 32 tests, no engine needed
 .venv/bin/cheessy spar --white "sf:depth=14" --black "sf:elo=1500" -n 20 --review
 .venv/bin/cheessy watch --white "sf:depth=12" --black "sf:elo=1600" -n 10
+.venv/bin/cheessy show games/spar.annotated.pgn
 ```
 
 `watch` serves a live board on 127.0.0.1. It is deliberately dependency-free:
@@ -31,6 +32,17 @@ The sparring loop exposes `on_game_start` / `on_move` / `on_game` callbacks for
 this; the plain CLI path passes none of them and behaves exactly as before.
 Note `on_game_start` fires from inside `play_game`, not `run`, because the
 opening isn't chosen until then.
+
+`show` serves the same page over a finished run, reading the `.json` sidecar
+`review` writes (the annotated PGN alone can't carry the classifications).
+
+Two things here are load-bearing and easy to undo by accident. The **match score
+is server-authoritative**: the event hub replays only the current game, so a tab
+opening mid-run never sees earlier results -- accumulating the score in the
+browser silently shows a wrong number to exactly the viewer most likely to look.
+And the viewer follows the **Modernist** design system (zero radius, 2px rules,
+Archivo, one red accent spent only on the last move, current ply and blunders);
+its tokens are copied from the system's own `styles.css`, not guessed.
 
 Requires Stockfish on PATH (`sudo pacman -S stockfish`; it is in chaotic-aur, not
 the official repos). `lc0` plus Maia weights are optional, needed only for

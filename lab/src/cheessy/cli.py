@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import threading
 import urllib.error
@@ -134,7 +135,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
 
     hub = watch.EventHub()
     try:
-        server = watch.start_server(hub, args.port)
+        server = watch.start_server(args.port, hub=hub)
     except OSError as exc:
         err_console.print(f"[red]could not bind port {args.port}:[/] {exc}")
         return 1
@@ -148,10 +149,19 @@ def cmd_watch(args: argparse.Namespace) -> int:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     games: list[chess.pgn.Game] = []
 
+    # The match score lives on the server. Accumulating it in the browser looked
+    # right until a tab opened mid-run: the hub replays only the current game, so
+    # a late viewer never sees earlier results and shows a score that is simply
+    # wrong. One source of truth, sent with every event that can change it.
+    score: dict[str, float] = {}
+
     def on_game_start(index, total, white_label, black_label, opening):
+        score.setdefault(white_label, 0.0)
+        score.setdefault(black_label, 0.0)
         hub.publish({
             "t": "game_start", "index": index, "total": total,
             "white": white_label, "black": black_label, "opening": opening,
+            "score": {"w": score[white_label], "b": score[black_label]},
         })
 
     def on_move(board, move, cp_white):
@@ -163,10 +173,21 @@ def cmd_watch(args: argparse.Namespace) -> int:
         })
 
     def on_game(game):
+        w = game.headers.get("White", "?")
+        b = game.headers.get("Black", "?")
+        result = game.headers.get("Result", "*")
+        if result == "1-0":
+            score[w] = score.get(w, 0.0) + 1
+        elif result == "0-1":
+            score[b] = score.get(b, 0.0) + 1
+        elif result == "1/2-1/2":
+            score[w] = score.get(w, 0.0) + 0.5
+            score[b] = score.get(b, 0.0) + 0.5
         hub.publish({
             "t": "game_end",
-            "result": game.headers.get("Result", "*"),
+            "result": result,
             "termination": game.headers.get("Termination", ""),
+            "score": {"w": score.get(w, 0.0), "b": score.get(b, 0.0)},
         })
 
     try:
@@ -208,6 +229,7 @@ def _review_games(games: list[chess.pgn.Game], depth: int, out_path: Path | None
 
     total_plies = sum(len(list(g.mainline_moves())) + 1 for g in games)
     reports = []
+    payload: list[dict] = []
     out_fh = out_path.open("w", encoding="utf-8") if out_path else None
 
     try:
@@ -221,6 +243,7 @@ def _review_games(games: list[chess.pgn.Game], depth: int, out_path: Path | None
                     progress=lambda: bar.advance(task),
                 )
                 reports.append(rep)
+                payload.append(report.report_to_dict(game, rep))
                 if out_fh:
                     print(report.annotated_pgn(game, rep), file=out_fh, end="\n\n")
     finally:
@@ -233,6 +256,12 @@ def _review_games(games: list[chess.pgn.Game], depth: int, out_path: Path | None
         report.print_match_summary(reports, console)
     if out_path:
         console.print(f"\n[green]wrote[/] annotated PGN -> {out_path}")
+        # The sidecar carries the classifications and per-move evals that a PGN
+        # comment can only half-express; `cheessy show` reads this, not the PGN.
+        json_path = out_path.with_suffix(".json")
+        json_path.write_text(json.dumps({"games": payload}), encoding="utf-8")
+        console.print(f"[green]wrote[/] review data  -> {json_path}")
+        console.print(f"\nStep through it with:  [bold]cheessy show {out_path}[/]")
     return 0
 
 
@@ -249,6 +278,44 @@ def cmd_review(args: argparse.Namespace) -> int:
         games = games[: args.limit]
     out = Path(args.output) if args.output else path.with_suffix(".annotated.pgn")
     return _review_games(games, args.depth, out)
+
+
+def cmd_show(args: argparse.Namespace) -> int:
+    given = Path(args.pgn)
+    # Accept the annotated PGN, the plain PGN, or the sidecar itself -- all three
+    # are things someone would reasonably type.
+    candidates = [given] if given.suffix == ".json" else [
+        given.with_suffix(".json"),
+        given.with_suffix("").with_suffix(".annotated.json"),
+        Path(str(given).replace(".pgn", ".annotated.json")),
+    ]
+    data_path = next((p for p in candidates if p.exists()), candidates[0])
+
+    try:
+        review = watch.ReviewData.load(data_path)
+    except watch.ViewerError as exc:
+        err_console.print(f"[red]{exc}[/]")
+        return 2
+
+    try:
+        server = watch.start_server(args.port, review=review)
+    except OSError as exc:
+        err_console.print(f"[red]could not bind port {args.port}:[/] {exc}")
+        return 1
+
+    url = f"http://127.0.0.1:{args.port}"
+    console.print(f"[bold]{len(review.games)}[/] reviewed games from {data_path.name}")
+    console.print(f"[green]viewer[/] {url}")
+    console.print("[dim]arrow keys step moves, click the graph to seek, Ctrl+C to stop[/]")
+    if not args.no_browser:
+        watch.open_in_browser(url)
+    try:
+        threading.Event().wait()
+    except KeyboardInterrupt:
+        console.print("\n[dim]bye[/]")
+    finally:
+        server.shutdown()
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -294,6 +361,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-plies", type=int, default=300)
     p.add_argument("--resign-cp", type=int, default=900)
     p.set_defaults(func=cmd_watch)
+
+    p = sub.add_parser("show", help="step through a reviewed run in the browser")
+    p.add_argument("pgn", help="the PGN you reviewed, or the .json sidecar")
+    p.add_argument("--port", type=int, default=7778)
+    p.add_argument("--no-browser", action="store_true")
+    p.set_defaults(func=cmd_show)
 
     p = sub.add_parser("review", help="analyse and annotate a PGN")
     p.add_argument("pgn")
