@@ -21,7 +21,16 @@ them at depth. Study material without a platform, an account, or an opponent.
 cd lab && uv venv && uv pip install -e .
 .venv/bin/python -m pytest tests/ -q          # 32 tests, no engine needed
 .venv/bin/cheessy spar --white "sf:depth=14" --black "sf:elo=1500" -n 20 --review
+.venv/bin/cheessy watch --white "sf:depth=12" --black "sf:elo=1600" -n 10
 ```
+
+`watch` serves a live board on 127.0.0.1. It is deliberately dependency-free:
+`chess.svg` renders each position server-side and it ships to the browser over
+SSE, so the page carries no chess logic and the project needs no JS toolchain.
+The sparring loop exposes `on_game_start` / `on_move` / `on_game` callbacks for
+this; the plain CLI path passes none of them and behaves exactly as before.
+Note `on_game_start` fires from inside `play_game`, not `run`, because the
+opening isn't chosen until then.
 
 Requires Stockfish on PATH (`sudo pacman -S stockfish`; it is in chaotic-aur, not
 the official repos). `lc0` plus Maia weights are optional, needed only for

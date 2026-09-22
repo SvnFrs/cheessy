@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -14,7 +15,7 @@ import chess.pgn
 from rich.console import Console
 from rich.progress import BarColumn, Progress, TextColumn, TimeRemainingColumn
 
-from . import engines, openings, report, spar
+from . import engines, openings, report, spar, watch
 from .annotate import annotate_game
 from .engines import EngineError
 
@@ -120,6 +121,76 @@ def cmd_spar(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_watch(args: argparse.Namespace) -> int:
+    white = engines.resolve(args.white)
+    black = engines.resolve(args.black)
+    cfg = spar.SparConfig(
+        games=args.games,
+        seed=args.seed,
+        max_plies=args.max_plies,
+        resign_cp=args.resign_cp,
+        allowed_openings=args.opening,
+    )
+
+    hub = watch.EventHub()
+    try:
+        server = watch.start_server(hub, args.port)
+    except OSError as exc:
+        err_console.print(f"[red]could not bind port {args.port}:[/] {exc}")
+        return 1
+    url = f"http://127.0.0.1:{args.port}"
+    console.print(f"[bold]{white.label}[/] vs [bold]{black.label}[/]  ({cfg.games} games)")
+    console.print(f"[green]viewer[/] {url}")
+    if not args.no_browser:
+        watch.open_in_browser(url)
+
+    out_path = Path(args.output)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    games: list[chess.pgn.Game] = []
+
+    def on_game_start(index, total, white_label, black_label, opening):
+        hub.publish({
+            "t": "game_start", "index": index, "total": total,
+            "white": white_label, "black": black_label, "opening": opening,
+        })
+
+    def on_move(board, move, cp_white):
+        hub.publish({
+            "t": "move",
+            "svg": watch.board_svg(board, move),
+            "san": watch.san_for(board, move),
+            "cp": cp_white,
+        })
+
+    def on_game(game):
+        hub.publish({
+            "t": "game_end",
+            "result": game.headers.get("Result", "*"),
+            "termination": game.headers.get("Termination", ""),
+        })
+
+    try:
+        with out_path.open("w", encoding="utf-8") as fh:
+            for game in spar.run(white, black, cfg, on_game=on_game,
+                                 on_move=on_move, on_game_start=on_game_start):
+                print(game, file=fh, end="\n\n", flush=True)
+                games.append(game)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]stopped[/]")
+    hub.publish({"t": "done", "total": len(games)})
+
+    console.print(f"[green]wrote[/] {len(games)} games -> {out_path}")
+    console.print(f"Review them with:  [bold]cheessy review {out_path}[/]")
+    console.print("[dim]viewer still up; Ctrl+C to stop[/]")
+    try:
+        threading.Event().wait()
+    except KeyboardInterrupt:
+        console.print("\n[dim]bye[/]")
+    finally:
+        server.shutdown()
+    return 0
+
+
 def _load_games(path: Path) -> list[chess.pgn.Game]:
     games = []
     with path.open(encoding="utf-8") as fh:
@@ -210,6 +281,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--review", action="store_true", help="analyse immediately after")
     p.add_argument("--review-depth", type=int, default=18)
     p.set_defaults(func=cmd_spar)
+
+    p = sub.add_parser("watch", help="play games in a live browser viewer")
+    p.add_argument("--white", default="sf:depth=12", help="engine spec")
+    p.add_argument("--black", default="sf:elo=1500", help="engine spec")
+    p.add_argument("-n", "--games", type=int, default=10)
+    p.add_argument("-o", "--output", default="games/watch.pgn")
+    p.add_argument("--port", type=int, default=7777)
+    p.add_argument("--no-browser", action="store_true", help="don't auto-open a tab")
+    p.add_argument("--seed", type=int)
+    p.add_argument("--opening", action="append", help="restrict to this opening")
+    p.add_argument("--max-plies", type=int, default=300)
+    p.add_argument("--resign-cp", type=int, default=900)
+    p.set_defaults(func=cmd_watch)
 
     p = sub.add_parser("review", help="analyse and annotate a PGN")
     p.add_argument("pgn")

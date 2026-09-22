@@ -85,9 +85,15 @@ def play_game(
     cfg: SparConfig,
     rng: random.Random,
     round_no: int,
+    on_move=None,
+    on_game_start=None,
 ) -> chess.pgn.Game:
     board = chess.Board()
     opening, book_line = openings.pick(rng, cfg.allowed_openings)
+
+    # Fired here rather than from run() because the opening isn't chosen until now.
+    if on_game_start:
+        on_game_start(round_no, cfg.games, white.label, black.label, opening)
 
     game = chess.pgn.Game()
     _headers(game, white, black, cfg, round_no, opening)
@@ -96,6 +102,8 @@ def play_game(
     for move in book_line:
         board.push(move)
         node = node.add_variation(move)
+        if on_move:
+            on_move(board, move, None)  # book theory carries no engine verdict
 
     handles = {chess.WHITE: white_engine, chess.BLACK: black_engine}
     specs = {chess.WHITE: white, chess.BLACK: black}
@@ -120,9 +128,10 @@ def play_game(
         node = node.add_variation(played.move)
 
         score = played.info.get("score")
-        if score is None:
-            continue
-        cp_white = score.white().score(mate_score=10_000)
+        cp_white = score.white().score(mate_score=10_000) if score else None
+        if on_move:
+            on_move(board, played.move, cp_white)
+        # No usable score means nothing to adjudicate on; keep playing.
         if cp_white is None:
             continue
 
@@ -149,8 +158,19 @@ def play_game(
     return game
 
 
-def run(white: EngineSpec, black: EngineSpec, cfg: SparConfig, on_game=None):
-    """Play the configured match, alternating colours. Yields finished games."""
+def run(
+    white: EngineSpec,
+    black: EngineSpec,
+    cfg: SparConfig,
+    on_game=None,
+    on_move=None,
+    on_game_start=None,
+):
+    """Play the configured match, alternating colours. Yields finished games.
+
+    The callbacks exist so a live viewer can follow along move by move; the
+    plain CLI path passes none of them and behaves exactly as before.
+    """
     rng = random.Random(cfg.seed)
     with white.open() as we, black.open() as be:
         for i in range(cfg.games):
@@ -158,7 +178,10 @@ def run(white: EngineSpec, black: EngineSpec, cfg: SparConfig, on_game=None):
             swap = i % 2 == 1
             w_spec, b_spec = (black, white) if swap else (white, black)
             w_eng, b_eng = (be, we) if swap else (we, be)
-            game = play_game(w_spec, b_spec, w_eng, b_eng, cfg, rng, i + 1)
+            game = play_game(
+                w_spec, b_spec, w_eng, b_eng, cfg, rng, i + 1,
+                on_move=on_move, on_game_start=on_game_start,
+            )
             if on_game:
                 on_game(game)
             yield game

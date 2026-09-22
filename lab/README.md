@@ -20,12 +20,20 @@ cheessy engines                 # confirm what was found
 # 20 games, strong engine against a ~1500 opponent, reviewed immediately
 cheessy spar --white "sf:depth=14" --black "sf:elo=1500" -n 20 --review
 
+# watch it play live in a browser
+cheessy watch --white "sf:depth=12" --black "sf:elo=1600" -n 10
+
 # study one opening in isolation
 cheessy spar --opening "Sicilian Najdorf" --opening "French Defense" -n 10 -o games/french.pgn
 
 # review any PGN, including games exported from chess.com or lichess
 cheessy review games/french.pgn --depth 20
 ```
+
+`watch` opens a board at <http://127.0.0.1:7777> that updates move by move, with
+an eval bar, the move list, and the opening name. It writes the same PGN as
+`spar`, so you can review the run afterwards. `--port` to move it, `--no-browser`
+to skip auto-opening a tab.
 
 `review` writes a `.annotated.pgn` next to the input with `[%eval]` comments and
 `?!`/`?`/`??`/`!!` glyphs. That file opens directly in lichess's analysis board,
@@ -74,6 +82,16 @@ after the move sees every capture and none of the recaptures, which makes routin
 trades look like brilliancies. The engine's own principal variation is replayed to
 a balanced depth before material is counted, and a sacrifice in an already-won
 position is technique rather than brilliance.
+
+## The viewer
+
+The board is rendered server-side by `chess.svg` and pushed to the browser over
+Server-Sent Events. The page holds no chess logic, so there is no npm, no bundler,
+no CDN, and no build step -- the whole UI is one HTML string in `watch.py`, and
+the browser only swaps in SVG and appends to a list.
+
+It binds to `127.0.0.1` only. A late-joining tab replays the current game so it
+isn't blank until the next move lands.
 
 ## Tests
 

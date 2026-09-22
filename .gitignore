@@ -1,3 +1,6 @@
 node_modules
 assets
 bun.lock
+# Playwright MCP scratch output
+.playwright-mcp/
+viewer.png
