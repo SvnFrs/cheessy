@@ -134,14 +134,19 @@ def cmd_watch(args: argparse.Namespace) -> int:
     )
 
     hub = watch.EventHub()
+    # Every game stays browsable after it ends. Engine games finish in seconds,
+    # so a viewer that only streams the current one is empty by the time anyone
+    # opens it -- the run is over and games 1..n-1 are gone.
+    log = watch.LiveLog()
     try:
-        server = watch.start_server(args.port, hub=hub)
+        server = watch.start_server(args.port, hub=hub, store=log)
     except OSError as exc:
         err_console.print(f"[red]could not bind port {args.port}:[/] {exc}")
         return 1
     url = f"http://127.0.0.1:{args.port}"
     console.print(f"[bold]{white.label}[/] vs [bold]{black.label}[/]  ({cfg.games} games)")
     console.print(f"[green]viewer[/] {url}")
+    console.print("[dim]every game stays browsable; Replay steps through any of them[/]")
     if not args.no_browser:
         watch.open_in_browser(url)
 
@@ -149,45 +154,29 @@ def cmd_watch(args: argparse.Namespace) -> int:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     games: list[chess.pgn.Game] = []
 
-    # The match score lives on the server. Accumulating it in the browser looked
-    # right until a tab opened mid-run: the hub replays only the current game, so
-    # a late viewer never sees earlier results and shows a score that is simply
-    # wrong. One source of truth, sent with every event that can change it.
-    score: dict[str, float] = {}
-
     def on_game_start(index, total, white_label, black_label, opening):
-        score.setdefault(white_label, 0.0)
-        score.setdefault(black_label, 0.0)
+        log.begin(white_label, black_label, opening)
         hub.publish({
             "t": "game_start", "index": index, "total": total,
             "white": white_label, "black": black_label, "opening": opening,
-            "score": {"w": score[white_label], "b": score[black_label]},
+            "scores": log.snapshot(),
         })
 
     def on_move(board, move, cp_white):
+        san = watch.san_for(board, move)
+        log.record(san, move.uci(), cp_white)
         hub.publish({
             "t": "move",
             "svg": watch.board_svg(board, move),
-            "san": watch.san_for(board, move),
-            "cp": cp_white,
+            "san": san, "uci": move.uci(), "cp": cp_white,
         })
 
     def on_game(game):
-        w = game.headers.get("White", "?")
-        b = game.headers.get("Black", "?")
         result = game.headers.get("Result", "*")
-        if result == "1-0":
-            score[w] = score.get(w, 0.0) + 1
-        elif result == "0-1":
-            score[b] = score.get(b, 0.0) + 1
-        elif result == "1/2-1/2":
-            score[w] = score.get(w, 0.0) + 0.5
-            score[b] = score.get(b, 0.0) + 0.5
+        termination = game.headers.get("Termination", "")
         hub.publish({
-            "t": "game_end",
-            "result": result,
-            "termination": game.headers.get("Termination", ""),
-            "score": {"w": score.get(w, 0.0), "b": score.get(b, 0.0)},
+            "t": "game_end", "result": result, "termination": termination,
+            "scores": log.finish(result, termination),
         })
 
     try:
@@ -202,7 +191,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
 
     console.print(f"[green]wrote[/] {len(games)} games -> {out_path}")
     console.print(f"Review them with:  [bold]cheessy review {out_path}[/]")
-    console.print("[dim]viewer still up; Ctrl+C to stop[/]")
+    console.print("[dim]viewer still up with every game browsable; Ctrl+C to stop[/]")
     try:
         threading.Event().wait()
     except KeyboardInterrupt:
@@ -298,7 +287,7 @@ def cmd_show(args: argparse.Namespace) -> int:
         return 2
 
     try:
-        server = watch.start_server(args.port, review=review)
+        server = watch.start_server(args.port, store=review)
     except OSError as exc:
         err_console.print(f"[red]could not bind port {args.port}:[/] {exc}")
         return 1

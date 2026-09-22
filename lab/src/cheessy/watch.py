@@ -98,14 +98,62 @@ def san_for(board_after: chess.Board, move: chess.Move) -> str:
     return probe.san(move)
 
 
-class ReviewData:
-    """A reviewed run loaded from the JSON sidecar `cheessy review` writes."""
+class GameStore:
+    """Games the viewer can browse.
 
-    def __init__(self, payload: dict, source: Path) -> None:
-        self.games: list[dict] = payload.get("games", [])
-        self.source = source
-        if not self.games:
-            raise ViewerError(f"{source} contains no games")
+    Both modes browse the same way, so they share one shape: a finished run
+    loaded from JSON, or a live run accumulating as it plays. The live case is
+    why this exists at all -- engine games finish in seconds, so a viewer with
+    no memory of earlier games is useless by the time anyone looks at it.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.games: list[dict] = []
+        self.source = ""
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self.games)
+
+    def index(self) -> list[dict]:
+        with self._lock:
+            return [
+                {
+                    "i": i,
+                    "white": g["white"],
+                    "black": g["black"],
+                    "result": g.get("result", "*"),
+                    "opening": g.get("opening", ""),
+                    "plies": len(g["moves"]),
+                    "live": g.get("live", False),
+                }
+                for i, g in enumerate(self.games)
+            ]
+
+    def get(self, i: int) -> dict:
+        with self._lock:
+            if not 0 <= i < len(self.games):
+                raise ViewerError(f"no game {i}")
+            return json.loads(json.dumps(self.games[i]))  # snapshot, not a live ref
+
+    def board_at(self, game_index: int, ply: int) -> tuple[chess.Board, chess.Move | None]:
+        """Replay `ply` half-moves. ply=0 is the starting position."""
+        with self._lock:
+            if not 0 <= game_index < len(self.games):
+                raise ViewerError(f"no game {game_index}")
+            ucis = [m["uci"] for m in self.games[game_index]["moves"]]
+        ply = max(0, min(ply, len(ucis)))
+        board = chess.Board()
+        last: chess.Move | None = None
+        for uci in ucis[:ply]:
+            last = chess.Move.from_uci(uci)
+            board.push(last)
+        return board, last
+
+
+class ReviewData(GameStore):
+    """A reviewed run loaded from the JSON sidecar `cheessy review` writes."""
 
     @classmethod
     def load(cls, path: Path) -> "ReviewData":
@@ -119,38 +167,72 @@ class ReviewData:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
             raise ViewerError(f"{path} is not valid review JSON: {exc}") from exc
-        return cls(payload, path)
-
-    def index(self) -> list[dict]:
-        """Enough of each game to populate the switcher without shipping moves."""
-        return [
-            {
-                "i": i,
-                "white": g["white"],
-                "black": g["black"],
-                "result": g["result"],
-                "opening": g.get("opening", ""),
-                "plies": len(g["moves"]),
-            }
-            for i, g in enumerate(self.games)
-        ]
-
-    def board_at(self, game_index: int, ply: int) -> tuple[chess.Board, chess.Move | None]:
-        """Replay `ply` half-moves of a game. ply=0 is the starting position."""
-        if not 0 <= game_index < len(self.games):
-            raise ViewerError(f"no game {game_index}")
-        moves = self.games[game_index]["moves"]
-        ply = max(0, min(ply, len(moves)))
-        board = chess.Board()
-        last: chess.Move | None = None
-        for entry in moves[:ply]:
-            last = chess.Move.from_uci(entry["uci"])
-            board.push(last)
-        return board, last
+        store = cls()
+        store.games = payload.get("games", [])
+        store.source = path.name
+        if not store.games:
+            raise ViewerError(f"{path} contains no games")
+        return store
 
 
-def _handler(hub: EventHub | None, review: ReviewData | None, page: bytes):
-    mode = "review" if review is not None else "live"
+class LiveLog(GameStore):
+    """Accumulates a sparring run so every game stays browsable after it ends."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.source = "live run"
+        self.score: dict[str, float] = {}
+
+    def begin(self, white: str, black: str, opening: str) -> None:
+        with self._lock:
+            self.games.append({
+                "white": white, "black": black, "opening": opening,
+                "result": "*", "termination": "", "live": True, "moves": [],
+                "summary": None,
+            })
+            self.score.setdefault(white, 0.0)
+            self.score.setdefault(black, 0.0)
+
+    def record(self, san: str, uci: str, cp_white: int | None) -> None:
+        with self._lock:
+            if not self.games:
+                return
+            g = self.games[-1]
+            ply = len(g["moves"]) + 1
+            g["moves"].append({
+                "ply": ply,
+                "n": (ply + 1) // 2,
+                "color": "w" if ply % 2 else "b",
+                "san": san, "uci": uci,
+                "cp_white": cp_white, "cp": cp_white,
+                "label": "", "best": None, "is_best": False,
+            })
+
+    def finish(self, result: str, termination: str) -> dict[str, float]:
+        with self._lock:
+            if not self.games:
+                return {}
+            g = self.games[-1]
+            g.update(result=result, termination=termination, live=False)
+            w, b = g["white"], g["black"]
+            if result == "1-0":
+                self.score[w] = self.score.get(w, 0.0) + 1
+            elif result == "0-1":
+                self.score[b] = self.score.get(b, 0.0) + 1
+            elif result == "1/2-1/2":
+                self.score[w] = self.score.get(w, 0.0) + 0.5
+                self.score[b] = self.score.get(b, 0.0) + 0.5
+            return dict(self.score)
+
+    def snapshot(self) -> dict[str, float]:
+        """The whole table, keyed by engine. Colours alternate between games, so
+        anything keyed by white/black reads backwards on half of them."""
+        with self._lock:
+            return dict(self.score)
+
+
+def _handler(hub: EventHub | None, store: GameStore | None, page: bytes):
+    mode = "live" if hub is not None else "review"
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -168,11 +250,11 @@ def _handler(hub: EventHub | None, review: ReviewData | None, page: bytes):
                 self._json({"mode": mode})
             elif path == "/events" and hub is not None:
                 self._events()
-            elif path == "/api/games" and review is not None:
-                self._json({"games": review.index(), "source": review.source.name})
-            elif path.startswith("/api/game/") and review is not None:
+            elif path == "/api/games" and store is not None:
+                self._json({"games": store.index(), "source": store.source})
+            elif path.startswith("/api/game/") and store is not None:
                 self._game(path)
-            elif path.startswith("/api/svg/") and review is not None:
+            elif path.startswith("/api/svg/") and store is not None:
                 self._svg(path)
             else:
                 self.send_error(404)
@@ -191,15 +273,14 @@ def _handler(hub: EventHub | None, review: ReviewData | None, page: bytes):
 
         def _game(self, path: str):
             try:
-                index = int(path.rsplit("/", 1)[1])
-                self._json(review.games[index])
-            except (ValueError, IndexError):
+                self._json(store.get(int(path.rsplit("/", 1)[1])))
+            except (ValueError, ViewerError):
                 self.send_error(404)
 
         def _svg(self, path: str):
             try:
                 _, game_index, ply = path.rsplit("/", 2)
-                board, last = review.board_at(int(game_index), int(ply))
+                board, last = store.board_at(int(game_index), int(ply))
             except (ValueError, ViewerError):
                 self.send_error(404)
                 return
@@ -232,10 +313,10 @@ def _handler(hub: EventHub | None, review: ReviewData | None, page: bytes):
 def start_server(
     port: int,
     hub: EventHub | None = None,
-    review: ReviewData | None = None,
+    store: GameStore | None = None,
 ) -> ThreadingHTTPServer:
     server = ThreadingHTTPServer(
-        ("127.0.0.1", port), _handler(hub, review, PAGE.encode())
+        ("127.0.0.1", port), _handler(hub, store, PAGE.encode())
     )
     server.daemon_threads = True
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -499,6 +580,8 @@ const ICON = {
   prev:  "M15 18l-6-6 6-6",
   next:  "M9 18l6-6-6-6",
   last:  "M13 17l5-5-5-5M6 17l5-5-5-5",
+  play:  "M6 3l14 9-14 9V3z",
+  pause: "M6 4h4v16H6zM14 4h4v16h-4z",
 };
 function icon(d) {
   return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
@@ -642,200 +725,262 @@ addEventListener("resize", () => {
 
 
 APP_JS = """
+// One browsing controller for both modes. A live run and a finished run differ
+// only in where the games come from and whether new ones keep arriving.
+const V = { mode: null, games: [], gi: -1, game: null, ply: 0,
+            following: true, playing: false, timer: null, speed: 1 };
+const SPEEDS = [1, 2, 4];
+const BASE_MS = 700;
+
+const fmtScore = v => {
+  const whole = Math.floor(v);
+  return Math.round((v % 1) * 2) === 1 ? (whole ? whole : "") + "\\u00bd" : String(whole);
+};
+
+function buildControls() {
+  $("transport").hidden = false;
+  $("transport").innerHTML =
+    '<button class="btn btn-icon" id="tp-first" title="First move (Home)">' + icon(ICON.first) + "</button>" +
+    '<button class="btn btn-icon" id="tp-prev" title="Previous move (Left arrow)">' + icon(ICON.prev) + "</button>" +
+    '<button class="btn" id="tp-play" title="Replay (Space)">' + icon(ICON.play) + '<span id="tp-playlabel">Replay</span></button>' +
+    '<button class="btn btn-icon" id="tp-next" title="Next move (Right arrow)">' + icon(ICON.next) + "</button>" +
+    '<button class="btn btn-icon" id="tp-last" title="Last move (End)">' + icon(ICON.last) + "</button>" +
+    '<button class="btn" id="tp-speed" title="Playback speed">1&times;</button>' +
+    '<select class="btn" id="tp-game" aria-label="Choose game"></select>' +
+    '<button class="btn" id="tp-live" hidden title="Jump back to the game being played">Live</button>';
+
+  $("tp-first").onclick = () => { pause(); leaveLive(); seek(0); };
+  $("tp-prev").onclick  = () => { pause(); leaveLive(); seek(V.ply - 1); };
+  $("tp-next").onclick  = () => { pause(); leaveLive(); seek(V.ply + 1); };
+  $("tp-last").onclick  = () => { pause(); leaveLive(); seek(V.game ? V.game.moves.length : 0); };
+  $("tp-play").onclick  = () => togglePlay();
+  $("tp-speed").onclick = () => {
+    V.speed = SPEEDS[(SPEEDS.indexOf(V.speed) + 1) % SPEEDS.length];
+    $("tp-speed").innerHTML = V.speed + "&times;";
+    if (V.playing) { stopTimer(); startTimer(); }
+  };
+  $("tp-game").onchange = e => { pause(); leaveLive(); loadGame(Number(e.target.value), false); };
+  $("tp-live").onclick  = () => {
+    pause(); V.following = true; $("tp-live").hidden = true;
+    loadGame(V.games.length - 1, true);
+  };
+
+  addEventListener("keydown", e => {
+    if (e.target.tagName === "SELECT") return;
+    const map = {
+      ArrowLeft:  () => { pause(); leaveLive(); seek(V.ply - 1); },
+      ArrowRight: () => { pause(); leaveLive(); seek(V.ply + 1); },
+      Home:       () => { pause(); leaveLive(); seek(0); },
+      End:        () => { pause(); leaveLive(); seek(V.game ? V.game.moves.length : 0); },
+      " ":        () => togglePlay(),
+    };
+    if (map[e.key]) { e.preventDefault(); map[e.key](); }
+  });
+}
+
+function leaveLive() {
+  if (V.mode !== "live" || !V.following) return;
+  V.following = false;
+  $("tp-live").hidden = false;
+}
+
+// -------------------------------------------------------------- playback
+function startTimer() {
+  V.timer = setInterval(() => {
+    if (!V.game || V.ply >= V.game.moves.length) { pause(); return; }
+    seek(V.ply + 1);
+  }, BASE_MS / V.speed);
+}
+function stopTimer() { clearInterval(V.timer); V.timer = null; }
+function pause() {
+  if (!V.playing) return;
+  V.playing = false; stopTimer();
+  $("tp-play").innerHTML = icon(ICON.play) + '<span id="tp-playlabel">Replay</span>';
+}
+function togglePlay() {
+  if (!V.game || !V.game.moves.length) return;
+  if (V.playing) { pause(); return; }
+  leaveLive();
+  // Replaying from the end would show nothing; start over.
+  if (V.ply >= V.game.moves.length) seek(0);
+  V.playing = true;
+  $("tp-play").innerHTML = icon(ICON.pause) + '<span id="tp-playlabel">Pause</span>';
+  startTimer();
+}
+
+// ------------------------------------------------------------ navigation
+async function seek(target, svg) {
+  if (!V.game) return;
+  V.ply = Math.max(0, Math.min(target, V.game.moves.length));
+  S.cursor = V.ply - 1;
+  const m = V.ply > 0 ? V.game.moves[V.ply - 1] : null;
+  setMeter(m && m.cp_white !== null ? m.cp_white : 0);
+  drawChart();
+  markCurrent();
+  updateControls();
+  if (svg) { $("board").innerHTML = svg; return; }
+  const res = await fetch("/api/svg/" + V.gi + "/" + V.ply);
+  if (res.ok) $("board").innerHTML = await res.text();
+}
+S.onSeek = ply => { pause(); leaveLive(); seek(ply); };
+
+function markCurrent() {
+  for (const b of document.querySelectorAll(".mv button"))
+    b.setAttribute("aria-current", String(Number(b.dataset.ply) === V.ply));
+  const active = document.querySelector('.mv button[aria-current="true"]');
+  if (!active) return;
+  const list = $("moves"), r = active.getBoundingClientRect(), lr = list.getBoundingClientRect();
+  if (r.top < lr.top || r.bottom > lr.bottom) list.scrollTop += r.top - lr.top - lr.height / 2;
+}
+
+function updateControls() {
+  const n = V.game ? V.game.moves.length : 0;
+  $("tp-first").disabled = $("tp-prev").disabled = V.ply <= 0;
+  $("tp-last").disabled = $("tp-next").disabled = V.ply >= n;
+  $("tp-play").disabled = n === 0;
+}
+
+// Book plies carry no engine verdict. Dropping them would shorten the series
+// while the cursor still counts plies, so the marker drifts further off with
+// every opening move; carry the last known evaluation through them instead.
+function seriesFrom(moves) {
+  let last = 0;
+  return moves.map(m => {
+    if (m.cp_white !== null && m.cp_white !== undefined) last = m.cp_white;
+    return { cp: last, n: m.n, color: m.color, san: m.san };
+  });
+}
+
+function renderMoves() {
+  const rows = V.game.moves.map(m => {
+    const tagged = ["Brilliant", "Blunder", "Mistake", "Inaccuracy"].includes(m.label);
+    const tag = tagged ? '<span class="tag t-' + m.label.toLowerCase() + '">' + m.label + "</span>" : "";
+    const ev = m.cp_white === null || m.cp_white === undefined ? "" : evalText(m.cp_white);
+    return '<div class="mv"><span class="n">' + m.n + (m.color === "w" ? "." : "\\u2026") +
+      '</span><button data-ply="' + m.ply + '"><b>' + esc(m.san) + "</b>" + tag +
+      '</button><span class="muted mono" style="text-align:right">' + ev + "</span></div>";
+  });
+  $("moves").innerHTML = rows.join("");
+  for (const b of document.querySelectorAll(".mv button"))
+    b.addEventListener("click", () => { pause(); leaveLive(); seek(Number(b.dataset.ply)); });
+}
+
+async function refreshIndex() {
+  const res = await fetch("/api/games");
+  if (!res.ok) return;
+  const data = await res.json();
+  V.games = data.games;
+  const sel = $("tp-game"), keep = sel.value;
+  sel.innerHTML = V.games.map(g =>
+    '<option value="' + g.i + '">' + (g.i + 1) + ". " + esc(g.white) + " vs " + esc(g.black) +
+    "  " + (g.live ? "playing" : g.result) +
+    (g.opening ? "  \\u00b7  " + esc(g.opening) : "") + "</option>").join("");
+  if (keep !== "" && Number(keep) < V.games.length) sel.value = keep;
+  if (V.mode === "review") {
+    $("navmeta").innerHTML = '<div class="nav-stat"><span class="k">Reviewing</span>' +
+      '<span class="v">' + esc(data.source) + "</span></div>";
+  }
+}
+
+async function loadGame(i, toEnd) {
+  if (i < 0 || i >= V.games.length) return;
+  V.gi = i;
+  const res = await fetch("/api/game/" + i);
+  if (!res.ok) { setStatus("lost", "Could not load game " + (i + 1)); return; }
+  V.game = await res.json();
+  $("tp-game").value = String(i);
+
+  const sum = V.game.summary;
+  renderSides(V.game.white, V.game.black, null, sum
+    ? { w: sum.white.accuracy.toFixed(1) + "%", b: sum.black.accuracy.toFixed(1) + "%" }
+    : liveScoreFor(V.game));
+  $("opening").textContent = V.game.opening || "\\u2014";
+  $("result").textContent = V.game.result === "*"
+    ? "in progress"
+    : V.game.result + "  \\u00b7  " + V.game.termination;
+
+  S.series = seriesFrom(V.game.moves);
+  renderMoves();
+  const empty = $("boardempty");
+  if (empty) empty.remove();
+  if (sum) {
+    setStatus("idle", "Accuracy " + sum.white.accuracy.toFixed(1) + "% / " +
+      sum.black.accuracy.toFixed(1) + "%  \\u00b7  average loss " +
+      sum.white.acpl + " / " + sum.black.acpl + " cp");
+  }
+  await seek(toEnd ? V.game.moves.length : (V.game.moves.length ? 1 : 0));
+}
+
+let LIVE_SCORES = {};   // engine name -> points
+const liveScoreFor = g => g && LIVE_SCORES[g.white] !== undefined
+  ? { w: fmtScore(LIVE_SCORES[g.white]), b: fmtScore(LIVE_SCORES[g.black]) }
+  : { w: "", b: "" };
+
 // ===================================================================== live
 function bootLive() {
-  // The server owns the score; we only render what it sends.
-  let score = { w: 0, b: 0 };
-  let names = { w: "", b: "" }, index = 0, total = 0, ply = 0;
-
-  const renderNav = () => {
-    const pad = n => String(n).padStart(2, "0");
-    $("navmeta").innerHTML =
-      '<div class="nav-stat"><span class="k">Game</span>' +
-      '<span class="v">' + pad(index) + " / " + pad(total) + '</span></div>';
-  };
-  const fmt = v => {
-    const half = Math.round((v % 1) * 2) === 1;
-    const whole = Math.floor(v);
-    if (half) return (whole ? whole : "") + "\\u00bd";
-    return String(whole);
-  };
-  const sides = turn => renderSides(names.w, names.b, turn,
-    { w: fmt(score.w), b: fmt(score.b) });
-
-  const addMove = (san, color, n) => {
-    const list = $("moves");
-    if (color === "w") {
-      const row = document.createElement("div");
-      row.className = "mv";
-      row.innerHTML = '<span class="n">' + n + '.</span><b>' + esc(san) + '</b><b></b>';
-      list.appendChild(row);
-    } else {
-      let row = list.lastElementChild;
-      if (!row) {
-        row = document.createElement("div");
-        row.className = "mv";
-        row.innerHTML = '<span class="n">' + n + '.</span><b>&hellip;</b><b></b>';
-        list.appendChild(row);
-      }
-      row.lastElementChild.textContent = san;
-    }
-    list.scrollTop = list.scrollHeight;
-  };
-
+  buildControls();
   const es = new EventSource("/events");
   es.onopen = () => setStatus("live", "Connected");
   es.onerror = () => setStatus("lost", "Disconnected \\u2014 is the run still going?");
-  es.onmessage = e => {
-    const ev = JSON.parse(e.data);
+
+  // Events replay in a burst on connect. An async handler would let their awaits
+  // interleave, so a slow game_start could land after done and reinstate
+  // "Playing" on a finished run. One chain, strictly in order.
+  let chain = Promise.resolve();
+  es.onmessage = e => { chain = chain.then(() => handle(JSON.parse(e.data))).catch(() => {}); };
+
+  async function handle(ev) {
 
     if (ev.t === "game_start") {
-      index = ev.index; total = ev.total; ply = 0;
-      names = { w: ev.white, b: ev.black };
-      score = ev.score || { w: 0, b: 0 };
-      S.series = []; S.cursor = -1;
-      $("moves").innerHTML = "";
-      $("opening").textContent = ev.opening || "\\u2014";
-      $("result").textContent = "";
-      renderNav(); sides("w"); setMeter(0); drawChart();
+      const pad = n => String(n).padStart(2, "0");
+      $("navmeta").innerHTML = '<div class="nav-stat"><span class="k">Game</span>' +
+        '<span class="v">' + pad(ev.index) + " / " + pad(ev.total) + "</span></div>";
+      if (ev.scores) LIVE_SCORES = ev.scores;
+      await refreshIndex();
+      if (V.following) await loadGame(V.games.length - 1, true);
       setStatus("live", "Playing");
 
     } else if (ev.t === "move") {
-      const empty = $("boardempty");
-      if (empty) empty.remove();
-      $("board").innerHTML = ev.svg;
-      ply++;
-      const color = ply % 2 === 1 ? "w" : "b";
-      const n = Math.ceil(ply / 2);
-      addMove(ev.san, color, n);
-      sides(ply % 2 === 1 ? "b" : "w");
-      if (ev.cp !== null && ev.cp !== undefined) {
-        S.series.push({ cp: ev.cp, n: n, color: color, san: ev.san });
-        S.cursor = S.series.length - 1;
-        setMeter(ev.cp);
-        drawChart();
-      }
+      // While following the game in play we already have the rendered board, so
+      // append locally instead of round-tripping for a position we were sent.
+      if (!V.following || V.gi !== V.games.length - 1 || !V.game) return;
+      const ply = V.game.moves.length + 1;
+      V.game.moves.push({
+        ply: ply, n: Math.ceil(ply / 2), color: ply % 2 ? "w" : "b",
+        san: ev.san, uci: ev.uci, cp_white: ev.cp, cp: ev.cp, label: "",
+      });
+      S.series = seriesFrom(V.game.moves);
+      renderMoves();
+      await seek(ply, ev.svg);
 
     } else if (ev.t === "game_end") {
-      $("result").textContent = ev.result + "  \\u00b7  " + ev.termination;
-      if (ev.score) score = ev.score;
-      sides(null);
+      if (ev.scores) LIVE_SCORES = ev.scores;
+      await refreshIndex();
+      if (V.following && V.game) {
+        V.game.result = ev.result; V.game.termination = ev.termination;
+        $("result").textContent = ev.result + "  \\u00b7  " + ev.termination;
+        renderSides(V.game.white, V.game.black, null, liveScoreFor(V.game));
+      }
       setStatus("idle", "Game over");
 
     } else if (ev.t === "done") {
-      setStatus("idle", "Run finished \\u2014 " + ev.total + " games. Ctrl+C in the terminal to stop the server.");
+      await refreshIndex();
+      setStatus("idle", ev.total + " games played. Pick any of them above, or press Replay.");
     }
-  };
+  }
 }
 
 // =================================================================== review
-function bootReview() {
-  let games = [], game = null, gi = 0, ply = 0;
-
-  const seek = async target => {
-    if (!game) return;
-    ply = Math.max(0, Math.min(target, game.moves.length));
-    S.cursor = ply - 1;
-    const m = ply > 0 ? game.moves[ply - 1] : null;
-    setMeter(m ? m.cp_white : 0);
-    drawChart();
-    for (const b of document.querySelectorAll(".mv button"))
-      b.setAttribute("aria-current", String(Number(b.dataset.ply) === ply));
-    const active = document.querySelector('.mv button[aria-current="true"]');
-    if (active) {
-      const list = $("moves"), r = active.getBoundingClientRect(),
-            lr = list.getBoundingClientRect();
-      if (r.top < lr.top || r.bottom > lr.bottom)
-        list.scrollTop += r.top - lr.top - lr.height / 2;
-    }
-    updateTransport();
-    const res = await fetch("/api/svg/" + gi + "/" + ply);
-    if (res.ok) $("board").innerHTML = await res.text();
-  };
-  S.onSeek = seek;
-
-  const renderMoves = () => {
-    const rows = game.moves.map(m => {
-      const cls = "t-" + m.label.toLowerCase();
-      const tagged = ["Brilliant", "Blunder", "Mistake", "Inaccuracy"].includes(m.label);
-      const tag = tagged ? '<span class="tag ' + cls + '">' + m.label + "</span>" : "";
-      return '<div class="mv"><span class="n">' + m.n + (m.color === "w" ? "." : "\\u2026") +
-        '</span><button data-ply="' + m.ply + '"><b>' + esc(m.san) + "</b>" + tag +
-        '</button><span class="muted mono" style="text-align:right">' +
-        evalText(m.cp_white) + "</span></div>";
-    });
-    $("moves").innerHTML = rows.join("");
-    for (const b of document.querySelectorAll(".mv button"))
-      b.addEventListener("click", () => seek(Number(b.dataset.ply)));
-  };
-
-  const updateTransport = () => {
-    $("tp-first").disabled = $("tp-prev").disabled = ply <= 0;
-    $("tp-last").disabled = $("tp-next").disabled = !game || ply >= game.moves.length;
-  };
-
-  const loadGame = async i => {
-    gi = i;
-    const res = await fetch("/api/game/" + i);
-    if (!res.ok) { setStatus("lost", "Could not load game " + (i + 1)); return; }
-    game = await res.json();
-    const acc = game.summary;
-    renderSides(game.white, game.black, null,
-      { w: acc.white.accuracy.toFixed(1) + "%", b: acc.black.accuracy.toFixed(1) + "%" });
-    $("opening").textContent = game.opening || "\\u2014";
-    $("result").textContent = game.result + "  \\u00b7  " + game.termination;
-    S.series = game.moves.map(m => ({ cp: m.cp_white, n: m.n, color: m.color, san: m.san }));
-    renderMoves();
-    const empty = $("boardempty");
-    if (empty) empty.remove();
-    setStatus("idle", "Accuracy " + acc.white.accuracy.toFixed(1) + "% / " +
-                      acc.black.accuracy.toFixed(1) + "%  \\u00b7  " +
-                      "average loss " + acc.white.acpl + " / " + acc.black.acpl + " cp");
-    await seek(game.moves.length ? 1 : 0);
-  };
-
-  const boot = async () => {
-    const res = await fetch("/api/games");
-    if (!res.ok) { setStatus("lost", "Could not load review data"); return; }
-    const data = await res.json();
-    games = data.games;
-    if (!games.length) {
-      setStatus("lost", "No games in " + data.source);
-      return;
-    }
-    const opts = games.map(g =>
-      '<option value="' + g.i + '">' + (g.i + 1) + ". " + esc(g.white) + " vs " +
-      esc(g.black) + "  " + g.result + (g.opening ? "  \\u00b7  " + esc(g.opening) : "") +
-      "</option>").join("");
-    $("navmeta").innerHTML =
-      '<div class="nav-stat"><span class="k">Reviewing</span>' +
-      '<span class="v">' + esc(data.source) + "</span></div>";
-    $("transport").hidden = false;
-    $("transport").innerHTML =
-      '<button class="btn btn-icon" id="tp-first" title="First move">' + icon(ICON.first) + "</button>" +
-      '<button class="btn btn-icon" id="tp-prev" title="Previous move">' + icon(ICON.prev) + "</button>" +
-      '<button class="btn btn-icon" id="tp-next" title="Next move">' + icon(ICON.next) + "</button>" +
-      '<button class="btn btn-icon" id="tp-last" title="Last move">' + icon(ICON.last) + "</button>" +
-      '<select class="btn" id="tp-game" aria-label="Choose game">' + opts + "</select>";
-    $("tp-first").onclick = () => seek(0);
-    $("tp-prev").onclick = () => seek(ply - 1);
-    $("tp-next").onclick = () => seek(ply + 1);
-    $("tp-last").onclick = () => seek(game ? game.moves.length : 0);
-    $("tp-game").onchange = e => loadGame(Number(e.target.value));
-
-    addEventListener("keydown", e => {
-      if (e.target.tagName === "SELECT") return;
-      const map = { ArrowLeft: () => seek(ply - 1), ArrowRight: () => seek(ply + 1),
-                    Home: () => seek(0), End: () => seek(game ? game.moves.length : 0) };
-      if (map[e.key]) { e.preventDefault(); map[e.key](); }
-    });
-    await loadGame(0);
-  };
-  boot();
+async function bootReview() {
+  buildControls();
+  $("tp-live").remove();
+  await refreshIndex();
+  if (!V.games.length) { setStatus("lost", "No games to review"); return; }
+  await loadGame(0, false);
 }
 
 fetch("/api/mode").then(r => r.json()).then(m => {
-  S.mode = m.mode;
+  V.mode = S.mode = m.mode;
   if (m.mode === "review") bootReview(); else bootLive();
 }).catch(() => setStatus("lost", "Could not reach the server"));
 """

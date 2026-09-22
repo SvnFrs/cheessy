@@ -35,13 +35,28 @@ cheessy review games/french.pgn --depth 20
 
 `watch` opens a board at <http://127.0.0.1:7777> that updates move by move, with
 an eval meter, an evaluation graph of the whole game, the running match score and
-the move list. It writes the same PGN as `spar`, so you can review the run
-afterwards. `--port` to move it, `--no-browser` to skip auto-opening a tab.
+the move list. It writes the same PGN as `spar`. `--port` to move it,
+`--no-browser` to skip auto-opening a tab.
 
-`show` opens the same instrument panel over a *finished* run at
-<http://127.0.0.1:7778>: arrow keys step moves, clicking the evaluation graph
-seeks, and every move carries its classification. It reads the `.json` sidecar
-`review` writes, so run `review` first.
+**Every game stays browsable.** Engine games have no clock, so ten of them finish
+in well under a minute -- by the time you switch to the browser the run is
+usually over. The server keeps them all: pick any game from the dropdown, step it
+with the arrow keys, or press **Replay** to play it back at 1x / 2x / 4x. While a
+run is still going the viewer follows the game in play; navigating away stops it
+following, and **Live** jumps back.
+
+`show` opens the same panel over a *reviewed* run at <http://127.0.0.1:7778>, and
+adds what the review pass computed: per-move classifications, accuracy and
+average loss. It reads the `.json` sidecar `review` writes, so run `review`
+first.
+
+| Key | |
+| --- | --- |
+| `<-` `->` | previous / next move |
+| `Home` `End` | start / end of game |
+| `Space` | replay, pause |
+
+Clicking the evaluation graph seeks to that ply.
 
 `review` writes a `.annotated.pgn` next to the input with `[%eval]` comments and
 `?!`/`?`/`??`/`!!` glyphs. That file opens directly in lichess's analysis board,

@@ -36,13 +36,26 @@ opening isn't chosen until then.
 `show` serves the same page over a finished run, reading the `.json` sidecar
 `review` writes (the annotated PGN alone can't carry the classifications).
 
-Two things here are load-bearing and easy to undo by accident. The **match score
-is server-authoritative**: the event hub replays only the current game, so a tab
-opening mid-run never sees earlier results -- accumulating the score in the
-browser silently shows a wrong number to exactly the viewer most likely to look.
-And the viewer follows the **Modernist** design system (zero radius, 2px rules,
-Archivo, one red accent spent only on the last move, current ply and blunders);
-its tokens are copied from the system's own `styles.css`, not guessed.
+Both modes browse a `GameStore` -- `LiveLog` accumulating as games play, or
+`ReviewData` from JSON -- so the front end has one code path. The live case is
+the reason it exists: engine games have no clock and finish in seconds, so a
+viewer that only streams the current game is empty by the time anyone opens it.
+
+Four things here are load-bearing and easy to undo by accident:
+
+- **The match score is server-authoritative and keyed by engine name**, never by
+  white/black slot. The hub replays only the current game, so a tab opening
+  mid-run never sees earlier results; and colours alternate between games, so a
+  slot-keyed score reads backwards on half of them. Both of those shipped once.
+- **SSE events are handled on one promise chain.** An `async` `onmessage` lets a
+  replayed burst interleave, and a slow `game_start` landing after `done` puts a
+  finished run back into "Playing".
+- **The eval series carries one point per ply**, with the last known evaluation
+  held through book moves. Filtering unevaluated plies out shortens the series
+  while the cursor still counts plies, so the graph marker drifts.
+- The viewer follows the **Modernist** design system (zero radius, 2px rules,
+  Archivo, one red accent spent only on the last move, current ply and blunders);
+  its tokens are copied from the system's own `styles.css`, not guessed.
 
 Requires Stockfish on PATH (`sudo pacman -S stockfish`; it is in chaotic-aur, not
 the official repos). `lc0` plus Maia weights are optional, needed only for
